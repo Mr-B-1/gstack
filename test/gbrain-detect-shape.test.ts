@@ -29,8 +29,51 @@ import { join } from "path";
 
 const DETECT_BIN = join(import.meta.dir, "..", "bin", "gstack-gbrain-detect");
 
+function resolveBunBin(): string {
+  return execFileSync("sh", ["-c", "command -v bun"], { encoding: "utf-8" }).trim();
+}
+
+function toGitBashPath(path: string): string {
+  return path.replace(/^([A-Za-z]):\\/, (_, drive) => `/${drive.toLowerCase()}/`).replace(/\\/g, "/");
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 /** Absolute bun path resolved once at module load (uses the test runner's PATH). */
-const BUN_BIN = execFileSync("sh", ["-c", "command -v bun"], { encoding: "utf-8" }).trim();
+const BUN_BIN = resolveBunBin();
+const DETECT_RUNNER = process.platform === "win32" ? "C:\\Program Files\\Git\\bin\\bash.exe" : BUN_BIN;
+const DETECT_RUNNER_ARGS =
+  process.platform === "win32"
+    ? ["-c", `${shellQuote(toGitBashPath(BUN_BIN))} run ${shellQuote(toGitBashPath(DETECT_BIN))}`]
+    : ["run", DETECT_BIN];
+const NO_GBRAIN_PATH = process.platform === "win32" ? "C:\\Windows\\System32" : "/usr/bin:/bin";
+
+function testPath(...entries: string[]): string {
+  return entries.join(process.platform === "win32" ? ";" : ":");
+}
+
+function writeFakeGbrain(bindir: string): void {
+  const fake = `#!/bin/sh
+case "$1 $2" in
+  "--version ")        echo "gbrain 0.33.1.0"; exit 0 ;;
+  "sources list")      echo '{"sources":[]}'; exit 0 ;;
+  "doctor "*)          echo '{"status":"ok","checks":[]}'; exit 0 ;;
+esac
+exit 0
+`;
+  const gbrainPath = join(bindir, "gbrain");
+  writeFileSync(gbrainPath, fake);
+  chmodSync(gbrainPath, 0o755);
+
+  if (process.platform === "win32") {
+    writeFileSync(
+      join(bindir, "gbrain.cmd"),
+      `@echo off\r\nif "%1"=="--version" echo gbrain 0.33.1.0& exit /b 0\r\nif "%1"=="sources" echo {"sources":[]}& exit /b 0\r\nif "%1"=="doctor" echo {"status":"ok","checks":[]}& exit /b 0\r\nexit /b 0\r\n`,
+    );
+  }
+}
 
 /**
  * Run detect with a controlled HOME + PATH so the output is deterministic.
@@ -39,7 +82,7 @@ const BUN_BIN = execFileSync("sh", ["-c", "command -v bun"], { encoding: "utf-8"
  * the controlled PATH.
  */
 function runDetect(env: Partial<NodeJS.ProcessEnv>): string {
-  return execFileSync(BUN_BIN, ["run", DETECT_BIN], {
+  return execFileSync(DETECT_RUNNER, DETECT_RUNNER_ARGS, {
     encoding: "utf-8",
     timeout: 15_000,
     stdio: ["ignore", "pipe", "pipe"],
@@ -52,7 +95,14 @@ function runDetect(env: Partial<NodeJS.ProcessEnv>): string {
 
 /** Run detect with --is-ok and return its exit code (never throws). */
 function runIsOk(env: Partial<NodeJS.ProcessEnv>): number {
-  const r = spawnSync(BUN_BIN, ["run", DETECT_BIN, "--is-ok"], {
+  const args =
+    process.platform === "win32"
+      ? [
+          "-c",
+          `${shellQuote(toGitBashPath(BUN_BIN))} run ${shellQuote(toGitBashPath(DETECT_BIN))} --is-ok`,
+        ]
+      : [...DETECT_RUNNER_ARGS, "--is-ok"];
+  const r = spawnSync(DETECT_RUNNER, args, {
     timeout: 15_000,
     stdio: ["ignore", "pipe", "pipe"],
     env: { ...process.env, GBRAIN_HOME: "", ...env },
@@ -79,7 +129,7 @@ describe("bin/gstack-gbrain-detect — shape regression", () => {
     try {
       const out = runDetect({
         HOME: tmp,
-        PATH: "/usr/bin:/bin",
+        PATH: NO_GBRAIN_PATH,
         GSTACK_HOME: tmp,
       });
       expect(() => JSON.parse(out)).not.toThrow();
@@ -93,7 +143,7 @@ describe("bin/gstack-gbrain-detect — shape regression", () => {
     try {
       const out = runDetect({
         HOME: tmp,
-        PATH: "/usr/bin:/bin",
+        PATH: NO_GBRAIN_PATH,
         GSTACK_HOME: tmp,
       });
       const parsed = JSON.parse(out) as DetectShape;
@@ -121,7 +171,7 @@ describe("bin/gstack-gbrain-detect — shape regression", () => {
     try {
       const out = runDetect({
         HOME: tmp,
-        PATH: "/usr/bin:/bin",
+        PATH: NO_GBRAIN_PATH,
         GSTACK_HOME: tmp,
       });
       const parsed = JSON.parse(out) as Record<string, unknown>;
@@ -155,7 +205,7 @@ describe("bin/gstack-gbrain-detect — shape regression", () => {
     try {
       const out = runDetect({
         HOME: tmp,
-        PATH: "/usr/bin:/bin",
+        PATH: NO_GBRAIN_PATH,
         GSTACK_HOME: tmp,
       });
       const parsed = JSON.parse(out) as DetectShape;
@@ -170,7 +220,7 @@ describe("bin/gstack-gbrain-detect — shape regression", () => {
     try {
       const out = runDetect({
         HOME: tmp,
-        PATH: "/usr/bin:/bin",
+        PATH: NO_GBRAIN_PATH,
         GSTACK_HOME: tmp,
       });
       const parsed = JSON.parse(out) as DetectShape;
@@ -185,7 +235,7 @@ describe("bin/gstack-gbrain-detect — shape regression", () => {
     try {
       const out = runDetect({
         HOME: tmp,
-        PATH: "/usr/bin:/bin",
+        PATH: NO_GBRAIN_PATH,
         GSTACK_HOME: tmp,
       });
       const parsed = JSON.parse(out) as DetectShape;
@@ -202,7 +252,7 @@ describe("bin/gstack-gbrain-detect — shape regression", () => {
     try {
       const out = runDetect({
         HOME: tmp,
-        PATH: "/usr/bin:/bin", // no gbrain on this PATH
+        PATH: NO_GBRAIN_PATH, // no gbrain on this PATH
         GSTACK_HOME: tmp,
         GSTACK_DETECT_NO_CACHE: "1",
       });
@@ -227,22 +277,11 @@ describe("bin/gstack-gbrain-detect — shape regression", () => {
       mkdirSync(configDir, { recursive: true });
       writeFileSync(configPath, JSON.stringify({ engine: "pglite" }));
 
-      // Fake gbrain: prints valid sources-list JSON
-      const fake = `#!/bin/sh
-case "$1 $2" in
-  "--version ")        echo "gbrain 0.33.1.0"; exit 0 ;;
-  "sources list")      echo '{"sources":[]}'; exit 0 ;;
-  "doctor "*)          echo '{"status":"ok","checks":[]}'; exit 0 ;;
-esac
-exit 0
-`;
-      const gbrainPath = join(bindir, "gbrain");
-      writeFileSync(gbrainPath, fake);
-      chmodSync(gbrainPath, 0o755);
+      writeFakeGbrain(bindir);
 
       const out = runDetect({
         HOME: home,
-        PATH: `${bindir}:/usr/bin:/bin`,
+        PATH: testPath(bindir, NO_GBRAIN_PATH),
         GSTACK_HOME: tmp,
         GSTACK_DETECT_NO_CACHE: "1",
       });
@@ -264,7 +303,7 @@ describe("bin/gstack-gbrain-detect --is-ok — live gate", () => {
     try {
       const code = runIsOk({
         HOME: tmp,
-        PATH: "/usr/bin:/bin", // no gbrain
+        PATH: NO_GBRAIN_PATH, // no gbrain
         GSTACK_HOME: tmp,
         GSTACK_DETECT_NO_CACHE: "1",
       });
@@ -283,21 +322,11 @@ describe("bin/gstack-gbrain-detect --is-ok — live gate", () => {
       mkdirSync(bindir, { recursive: true });
       mkdirSync(configDir, { recursive: true });
       writeFileSync(join(configDir, "config.json"), JSON.stringify({ engine: "pglite" }));
-      const fake = `#!/bin/sh
-case "$1 $2" in
-  "--version ")        echo "gbrain 0.33.1.0"; exit 0 ;;
-  "sources list")      echo '{"sources":[]}'; exit 0 ;;
-  "doctor "*)          echo '{"status":"ok","checks":[]}'; exit 0 ;;
-esac
-exit 0
-`;
-      const gbrainPath = join(bindir, "gbrain");
-      writeFileSync(gbrainPath, fake);
-      chmodSync(gbrainPath, 0o755);
+      writeFakeGbrain(bindir);
 
       const code = runIsOk({
         HOME: home,
-        PATH: `${bindir}:/usr/bin:/bin`,
+        PATH: testPath(bindir, NO_GBRAIN_PATH),
         GSTACK_HOME: tmp,
         GSTACK_DETECT_NO_CACHE: "1",
       });
@@ -311,7 +340,7 @@ exit 0
     // Run both surfaces against the same env and assert they never disagree.
     const tmp = mkdtempSync(join(tmpdir(), "detect-isok-"));
     try {
-      const env = { HOME: tmp, PATH: "/usr/bin:/bin", GSTACK_HOME: tmp, GSTACK_DETECT_NO_CACHE: "1" };
+      const env = { HOME: tmp, PATH: NO_GBRAIN_PATH, GSTACK_HOME: tmp, GSTACK_DETECT_NO_CACHE: "1" };
       const status = (JSON.parse(runDetect(env)) as DetectShape).gbrain_local_status;
       const code = runIsOk(env);
       expect(code === 0).toBe(status === "ok");
